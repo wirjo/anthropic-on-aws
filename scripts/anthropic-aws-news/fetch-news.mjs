@@ -84,7 +84,7 @@ function saveSeen(seenSet) {
 }
 
 function appendToTracker(newItems) {
-  const header = "# Anthropic on AWS — news tracker\n\nAuto-updated by `.github/workflows/anthropic-aws-news-tracker.yml`. Newest first.\n";
+  const header = "# Claude Platform on AWS — news tracker\n\nAuto-updated by `.github/workflows/anthropic-aws-news-tracker.yml`. Newest first.\n";
   const existing = existsSync(TRACKER_PATH) ? readFileSync(TRACKER_PATH, "utf8") : header;
   const body = existing.startsWith("# ") ? existing : header;
 

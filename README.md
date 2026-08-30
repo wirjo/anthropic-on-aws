@@ -1,4 +1,4 @@
-# Anthropic on AWS
+# Claude Platform on AWS
 
 > ⚠️ **Deprecation Notice (Jul 2026):** Amazon Bedrock Agents has been renamed
 > "Bedrock Agents Classic" and moved to **maintenance mode** as of Jun 30, 2026.
@@ -9,7 +9,7 @@
 > [AgentCore documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/agentcore.html),
 > and the [migration guide](https://docs.aws.amazon.com/bedrock/latest/userguide/agents-classic-migration.html).
 
-This repo contains a collection of examples and notebooks for using Anthropic on AWS.
+This repo contains a collection of examples and notebooks for using Claude Platform on AWS.
 
 ## Notebooks
 - [Cookbooks](/cookbooks/README.md)

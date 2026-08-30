@@ -1,1 +1,1 @@
-# Anthropic on AWS
+# Claude Platform on AWS

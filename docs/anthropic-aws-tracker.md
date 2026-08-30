@@ -1,4 +1,4 @@
-# Anthropic on AWS — news tracker
+# Claude Platform on AWS — news tracker
 
 
 ## 2026-08-28
