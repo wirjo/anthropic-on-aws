@@ -81,6 +81,41 @@ export function applyNagAcknowledgements(
       'CIDR and the runtime security group, never 0.0.0.0/0.',
   });
 
+  ack('PortalUserPool/Resource', {
+    id: 'AwsSolutions::AwsSolutions-COG8',
+    reason:
+      'Advanced security / plus tier is a paid Cognito feature deferred ' +
+      'to customer production hardening, same as other cost-optional ' +
+      'controls in this sample; the user pool otherwise enforces a ' +
+      'strong password policy and email verification.',
+  }, {
+    id: 'AwsSolutions::AwsSolutions-COG2',
+    reason:
+      'MFA is deferred to customer production hardening, matching the ' +
+      'baseline-cost posture of this sample; the portal is additionally ' +
+      'gated behind admin-provisioned users (no self-signup) and the ' +
+      'deployment-scoped TrustedClientCidr on the underlying API.',
+  });
+
+  for (const assetPath of [
+    'portal/GET/Resource',
+    'portal/app.js/GET/Resource',
+    'portal/terminal-vendor.js/GET/Resource',
+    'portal/xterm.css/GET/Resource',
+    'portal/config.json/GET/Resource',
+  ]) {
+    ack(`ControlApi/Default/${assetPath}`, {
+      id: 'AwsSolutions::AwsSolutions-APIG4',
+      reason:
+        'These GET routes serve only the static, unauthenticated portal ' +
+        'SPA shell (HTML/CSS/JS) a browser must load before it can ' +
+        'obtain a Cognito token — the standard public-bootstrap-asset ' +
+        'pattern for a browser-based SPA. Every route that returns ' +
+        'session data or control-plane access (/portal/sessions*) ' +
+        'requires the Cognito user pool authorizer (PortalAuthorizer).',
+    });
+  }
+
   ack('WorkspaceBucket/Resource', {
     id: 'AwsSolutions::AwsSolutions-S1',
     reason:
