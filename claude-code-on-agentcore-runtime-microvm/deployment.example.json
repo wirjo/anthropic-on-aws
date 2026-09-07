@@ -5,6 +5,6 @@
   "trustedClientCidr": "10.101.0.0/22",
   "bedrockModelId": "anthropic.claude-sonnet-5",
   "allowClaudeAiSubscription": false,
-  "enablePortal": false,
+  "enablePortal": true,
   "idleAfterSeconds": 900
 }

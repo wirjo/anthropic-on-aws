@@ -40,7 +40,7 @@ const configuration = await loadConfiguration(configPath);
 const region = configuration.region ?? 'us-east-1';
 const vpcCidr = configuration.vpcCidr ?? '10.43.0.0/16';
 const projectName = configuration.projectName ?? 'claude-agentcore';
-const enablePortal = configuration.enablePortal ?? false;
+const enablePortal = configuration.enablePortal ?? true;
 
 if (!skipImage) {
   await run('npx', [
