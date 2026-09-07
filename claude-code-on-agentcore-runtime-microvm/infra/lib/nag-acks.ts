@@ -146,7 +146,14 @@ export function applyNagAcknowledgements(
   });
 
   if (options.bedrockUsesInferenceProfile) {
-    ack('ControlFunction/ServiceRole/DefaultPolicy/Resource', {
+    // The wildcard is on RuntimeExecutionRole (the AgentCore Runtime
+    // microVM's role, which actually calls bedrock:InvokeModel), not
+    // ControlFunction (the control-plane Lambda, which never calls
+    // Bedrock directly) -- this suppression previously targeted the
+    // wrong construct path and cdk-nag flagged the finding as
+    // unsuppressed the first time this deployment actually exercised the
+    // inference-profile branch end to end.
+    ack('RuntimeExecutionRole/DefaultPolicy/Resource', {
       id: `AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:bedrock:*::foundation-model/${options.bedrockFoundationModelId}]`,
       reason:
         'Cross-region inference profiles require the foundation-model ' +
