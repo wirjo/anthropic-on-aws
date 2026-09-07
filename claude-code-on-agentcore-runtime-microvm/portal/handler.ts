@@ -21,7 +21,7 @@ export async function handler(
     return response(405, 'text/plain', 'Method not allowed');
   }
   if (resource === '/portal') {
-    return response(200, 'text/html; charset=utf-8', PORTAL_HTML);
+    return response(200, 'text/html; charset=utf-8', portalHtml(event));
   }
   if (resource === '/portal/app.js') {
     return response(200, 'application/javascript; charset=utf-8', PORTAL_JS);
@@ -77,6 +77,26 @@ function portalUrl(event: APIGatewayProxyEvent): string {
     throw new Error('Request is missing a Host header');
   }
   return `https://${host}/${stage}/portal`;
+}
+
+// Every asset/API reference in PORTAL_HTML/PORTAL_JS is a relative path
+// ("app.js", "config.json", "sessions", ...). The browser resolves those
+// against the *document's* URL, and "/v1/portal" (no trailing slash) is
+// treated as a file, not a directory — relative resolution would otherwise
+// land one level up, at "/v1/app.js" etc., which don't exist. A <base> tag
+// with a trailing slash fixes every relative reference in one place,
+// including fetch() calls, and stays correct regardless of stage name or
+// whether the request came through the private API directly or a proxy/CDN
+// in front of it (see README, "Public access").
+function portalHtml(event: APIGatewayProxyEvent): string {
+  const { stage } = event.requestContext;
+  if (!stage) {
+    throw new Error('Request context is missing stage');
+  }
+  return PORTAL_HTML.replace(
+    '<head>',
+    `<head>\n<base href="/${stage}/portal/">`,
+  );
 }
 
 function headerValue(
