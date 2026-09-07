@@ -58,7 +58,7 @@ export const PORTAL_HTML = `<!doctype html>
       </thead>
       <tbody id="sessions"></tbody>
     </table>
-    <p id="error"></p>
+    <p id="error" hidden></p>
   </section>
 </main>
 <dialog id="terminal-dialog">
@@ -78,17 +78,127 @@ var sessions = [];
 function el(id) { return document.getElementById(id); }
 
 async function loadConfig() {
-  var response = await fetch('config.json');
-  config = await response.json();
+  if (!config) {
+    var response = await fetch('config.json');
+    config = await response.json();
+  }
+  return config;
+}
+
+function base64Url(bytes) {
+  var text = '';
+  new Uint8Array(bytes).forEach(function (byte) {
+    text += String.fromCharCode(byte);
+  });
+  return btoa(text)
+    .replace(/[+]/g, '-').replace(/[/]/g, '_').replace(/=+$/, '');
+}
+
+function idToken() { return sessionStorage.getItem('portalIdToken'); }
+
+function hostedUiUrl(cfg, endpoint) {
+  return 'https://' + cfg.userPoolDomain + '/oauth2/' + endpoint;
+}
+
+function claims() {
+  var token = idToken();
+  if (!token) { return null; }
+  try {
+    var encoded = token.split('.')[1]
+      .replace(/-/g, '+').replace(/_/g, '/');
+    encoded += '='.repeat((4 - encoded.length % 4) % 4);
+    return JSON.parse(atob(encoded));
+  } catch (error) { return null; }
+}
+
+function signedIn() {
+  var current = claims();
+  return Boolean(current && current.exp * 1000 > Date.now());
+}
+
+function signOut() {
+  sessionStorage.removeItem('portalIdToken');
+  sessionStorage.removeItem('portalVerifier');
+  sessionStorage.removeItem('portalState');
+  render();
+}
+
+// Authorization Code + PKCE against the Cognito Hosted UI. There is no
+// client secret (public client), so PKCE is what stops a stolen
+// authorization code from being redeemed by anyone but the browser that
+// requested it.
+async function login() {
+  var cfg = await loadConfig();
+  var verifier = base64Url(crypto.getRandomValues(new Uint8Array(32)));
+  var digest = await crypto.subtle.digest(
+    'SHA-256', new TextEncoder().encode(verifier));
+  var state = base64Url(crypto.getRandomValues(new Uint8Array(16)));
+  sessionStorage.setItem('portalVerifier', verifier);
+  sessionStorage.setItem('portalState', state);
+  var authorize = {
+    response_type: 'code',
+    client_id: cfg.clientId,
+    redirect_uri: cfg.redirectUri,
+    scope: 'openid profile email',
+    state: state,
+    code_challenge_method: 'S256',
+    code_challenge: base64Url(digest),
+  };
+  location.assign(
+    hostedUiUrl(cfg, 'authorize') + '?' + new URLSearchParams(authorize));
+}
+
+async function completeLogin() {
+  var params = new URLSearchParams(location.search);
+  var code = params.get('code');
+  var oauthError = params.get('error');
+  if (!code && !oauthError) { return; }
+  history.replaceState(null, '', location.pathname);
+  var expectedState = sessionStorage.getItem('portalState');
+  if (!expectedState || params.get('state') !== expectedState) {
+    throw new Error('Sign-in state mismatch; try again');
+  }
+  if (oauthError) {
+    throw new Error(
+      'Sign-in failed: ' + (params.get('error_description') || oauthError));
+  }
+  var cfg = await loadConfig();
+  var verifier = sessionStorage.getItem('portalVerifier');
+  if (!verifier) {
+    throw new Error('Sign-in session expired; try again');
+  }
+  var res = await fetch(hostedUiUrl(cfg, 'token'), {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: cfg.clientId,
+      redirect_uri: cfg.redirectUri,
+      code: code,
+      code_verifier: verifier,
+    }),
+  });
+  var tokens = await res.json();
+  if (!res.ok || !tokens.id_token) {
+    throw new Error('Token exchange failed: ' + (tokens.error || res.status));
+  }
+  sessionStorage.setItem('portalIdToken', tokens.id_token);
+  sessionStorage.removeItem('portalVerifier');
+  sessionStorage.removeItem('portalState');
 }
 
 function api(method, path, body) {
   return fetch(path, {
     method: method,
-    headers: body ? { 'content-type': 'application/json' } : {},
-    body: body ? JSON.stringify(body) : undefined,
-    credentials: 'include'
+    headers: Object.assign(
+      { authorization: idToken() },
+      body ? { 'content-type': 'application/json' } : {}),
+    body: body ? JSON.stringify(body) : undefined
   }).then(function (response) {
+    if (response.status === 401) {
+      signOut();
+      throw new Error('Session expired; sign in again');
+    }
     if (!response.ok) {
       return response.json().catch(function () { return {}; }).then(function (value) {
         var error = new Error(value.message || 'Request failed');
@@ -102,9 +212,13 @@ function api(method, path, body) {
 
 function showError(error) {
   el('error').textContent = error && error.message ? error.message : String(error);
+  el('error').hidden = false;
 }
 
-function clearError() { el('error').textContent = ''; }
+function clearError() {
+  el('error').textContent = '';
+  el('error').hidden = true;
+}
 
 function renderSessions() {
   var body = el('sessions');
@@ -201,19 +315,25 @@ function closeTerminal() {
   }
 }
 
+function render() {
+  var authenticated = signedIn();
+  el('sign-in').hidden = authenticated;
+  el('app').hidden = !authenticated;
+  el('sign-out').hidden = !authenticated;
+  var current = claims();
+  el('who').textContent = authenticated && current ? (current.email || current.sub) : '';
+  if (authenticated) { refresh(); }
+}
+
 el('start-session').addEventListener('click', startSession);
 el('refresh').addEventListener('click', refresh);
 el('terminal-close').addEventListener('click', closeTerminal);
 el('sign-in').addEventListener('click', function () {
-  loadConfig().then(function () {
-    window.location.href =
-      'https://' + config.userPoolDomain + '/login?client_id=' +
-      config.clientId + '&response_type=code&redirect_uri=' +
-      encodeURIComponent(config.redirectUri);
-  });
+  login().catch(showError);
 });
+el('sign-out').addEventListener('click', signOut);
 
-el('app').hidden = false;
-el('sign-in').hidden = true;
-refresh();
+completeLogin()
+  .then(render)
+  .catch(showError);
 `;

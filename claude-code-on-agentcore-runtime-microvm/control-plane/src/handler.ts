@@ -18,6 +18,7 @@ import type {
   SessionRecord,
   StartConfiguration,
 } from './model.js';
+import { isPortalRoute, portalCaller, portalRoutePath } from './portal.js';
 import { ControlError, ControlService } from './service.js';
 
 type ControlEvent =
@@ -63,13 +64,20 @@ export async function handler(
   observeApiUrl(event);
 
   try {
-    const ownerPrincipal = callerPrincipal(event);
+    // Portal routes accept Cognito browser tokens. Their owner is
+    // oidc:<sub> rather than an IAM caller ARN, so the two identity
+    // namespaces never collide.
+    const portal = isPortalRoute(event);
+    const ownerPrincipal = portal
+      ? portalCaller(event)
+      : callerPrincipal(event);
     const method = event.httpMethod.toUpperCase();
-    const path = event.resource;
+    const path = portal ? portalRoutePath(event.resource) : event.resource;
     const sessionId = event.pathParameters?.sessionId;
 
     if (
       method === 'POST' &&
+      !portal &&
       path === '/sessions/{sessionId}/checkpoint-urls'
     ) {
       if (!sessionId) {
