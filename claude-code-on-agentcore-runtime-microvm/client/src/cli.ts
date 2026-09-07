@@ -5,7 +5,7 @@ import {
   ControlApiClient,
   type SessionView,
 } from './api.js';
-import { attachTerminal } from './terminal.js';
+import { attachTerminal, developerShellBootstrapCommand } from './terminal.js';
 
 let region = 'us-east-1';
 let profile = 'default';
@@ -37,14 +37,18 @@ async function main(): Promise<void> {
       });
       printStartResult(result);
       if (!noConnect) {
-        await attachTerminal(await client.connect(result.session.sessionId));
+        await attachTerminal(await client.connect(result.session.sessionId), {
+          bootstrapCommand: developerShellBootstrapCommand(),
+        });
       }
       break;
     }
     case 'connect': {
       const sessionId = requiredArgument(args, 'session ID');
       assertNoArguments(args);
-      await attachTerminal(await client.connect(sessionId));
+      await attachTerminal(await client.connect(sessionId), {
+        bootstrapCommand: developerShellBootstrapCommand(),
+      });
       break;
     }
     case 'list': {

@@ -156,7 +156,7 @@ export interface AgentRuntimeService {
     runtimeSessionId: string,
     shellId: string,
   ): Promise<ShellConnection>;
-  suspend(runtimeSessionId: string): Promise<void>;
+  suspend(agentRuntimeArn: string, runtimeSessionId: string): Promise<void>;
   resume(agentRuntimeArn: string, runtimeSessionId: string): Promise<void>;
   terminate(agentRuntimeArn: string, runtimeSessionId: string): Promise<void>;
 }

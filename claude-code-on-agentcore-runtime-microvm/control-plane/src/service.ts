@@ -315,7 +315,11 @@ export class ControlService {
     if (!claimed) {
       return (await this.options.repository.get(sessionId)) ?? record;
     }
-    await this.options.agentRuntime.suspend(record.runtimeSessionId);
+    const config = await this.options.loadConfiguration();
+    await this.options.agentRuntime.suspend(
+      record.runtimeArn ?? config.agentRuntimeArn,
+      record.runtimeSessionId,
+    );
     return { ...record, state: 'SUSPENDED', updatedAt };
   }
 

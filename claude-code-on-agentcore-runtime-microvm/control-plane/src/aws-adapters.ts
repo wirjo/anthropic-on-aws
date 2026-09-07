@@ -1,5 +1,6 @@
 import {
   BedrockAgentCoreClient,
+  InvokeAgentRuntimeCommand,
   InvokeAgentRuntimeCommandCommand,
   StopRuntimeSessionCommand,
 } from '@aws-sdk/client-bedrock-agentcore';
@@ -308,18 +309,27 @@ export class AwsAgentRuntimeService implements AgentRuntimeService {
       );
     }
     const startedAt = Math.floor(Date.now() / 1_000);
-    await this.client.send(
-      new InvokeAgentRuntimeCommandCommand({
-        agentRuntimeArn: input.agentRuntimeArn,
-        runtimeSessionId: input.runtimeSessionId,
-        contentType: 'application/json',
-        accept: 'application/json',
-        body: {
-          command: `/opt/claude-agentcore/session-bootstrap.sh '${input.payload}'`,
-          timeout: 60,
-        },
-      }),
-    );
+    // This must be a real /invocations POST (InvokeAgentRuntimeCommand,
+    // the *data-plane* "invoke the agent" API) carrying the
+    // `{"command":"bootstrap","payload":...}` JSON body that
+    // agent.py's HookHandler.do_POST expects. It is easy to confuse this
+    // with InvokeAgentRuntimeCommandCommand (the *shell-exec* API used by
+    // `get()` below for liveness probing, which runs an arbitrary shell
+    // command via a PTY-less exec channel and never reaches the
+    // /invocations HTTP handler at all). Sending the bootstrap payload
+    // through the shell-exec API -- as this code previously did, via a
+    // fictional `/opt/claude-agentcore/session-bootstrap.sh` script that
+    // the Dockerfile never installs -- means `Runtime.bootstrap()` in
+    // agent.py never runs: /workspace is never restored and
+    // /var/lib/claude-agentcore/session.json is never written, so every
+    // later shell connection fails with "Session configuration is
+    // unavailable".
+    await invokeLifecycleCommand(this.client, {
+      agentRuntimeArn: input.agentRuntimeArn,
+      runtimeSessionId: input.runtimeSessionId,
+      command: 'bootstrap',
+      payload: input.payload,
+    });
     return {
       runtimeSessionId: input.runtimeSessionId,
       state: 'RUNNING',
@@ -384,10 +394,23 @@ export class AwsAgentRuntimeService implements AgentRuntimeService {
     };
   }
 
-  public async suspend(_runtimeSessionId: string): Promise<void> {
-    // No control-plane suspend primitive; see class doc comment. The
-    // control service still transitions its own state machine and relies
-    // on the in-container agent to checkpoint on the next shell signal.
+  public async suspend(
+    agentRuntimeArn: string,
+    runtimeSessionId: string,
+  ): Promise<void> {
+    // No control-plane suspend primitive; see class doc comment. What we
+    // *can* do -- and previously did not -- is tell the in-container
+    // agent to checkpoint the workspace to S3 right now, via the same
+    // `/invocations` "suspend" command `Runtime.checkpoint()` in
+    // agent.py already knows how to handle. Without this call `suspend`
+    // was a pure no-op: the control service flipped its own DynamoDB
+    // record to SUSPENDED while the container never wrote a checkpoint,
+    // so a later `resume` had nothing real to resume into.
+    await invokeLifecycleCommand(this.client, {
+      agentRuntimeArn,
+      runtimeSessionId,
+      command: 'suspend',
+    });
   }
 
   public async resume(
@@ -404,6 +427,26 @@ export class AwsAgentRuntimeService implements AgentRuntimeService {
     agentRuntimeArn: string,
     runtimeSessionId: string,
   ): Promise<void> {
+    // Checkpoint before stopping the runtime session, same rationale as
+    // `suspend` above: previously this called StopRuntimeSession directly
+    // with no prior checkpoint command, so the workspace was discarded on
+    // every terminate. A checkpoint failure here (for example, the
+    // container already gone, or a transient network error) must not
+    // block termination -- the microVM still needs to be stopped so the
+    // session does not keep running (and billing) until the 8h max
+    // duration elapses. We log and continue rather than throw.
+    try {
+      await invokeLifecycleCommand(this.client, {
+        agentRuntimeArn,
+        runtimeSessionId,
+        command: 'terminate',
+      });
+    } catch (error) {
+      console.error('workspace checkpoint before termination failed', {
+        runtimeSessionId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
     try {
       await this.client.send(
         new StopRuntimeSessionCommand({ agentRuntimeArn, runtimeSessionId }),
@@ -490,6 +533,60 @@ export function workspaceCheckpointKey(
 
 function claimKey(ownerHash: string, workspaceId: string): string {
   return `${ownerHash}#${workspaceId}`;
+}
+
+/**
+ * Sends a real AgentCore Runtime session-lifecycle command
+ * (`bootstrap` | `suspend` | `terminate`) to the container's
+ * `/invocations` HTTP endpoint via the `InvokeAgentRuntimeCommand`
+ * data-plane API (not the shell-exec `InvokeAgentRuntimeCommandCommand`
+ * API), matching the JSON contract `HookHandler.do_POST` implements in
+ * agent-runtime/agent.py: request body `{"command": ..., "payload": ...}`,
+ * response body `{"status": "success", "response": {...}}` on success or
+ * `{"message": ...}` with a non-200 status on failure.
+ */
+async function invokeLifecycleCommand(
+  client: BedrockAgentCoreClient,
+  input: {
+    agentRuntimeArn: string;
+    runtimeSessionId: string;
+    command: 'bootstrap' | 'suspend' | 'terminate';
+    payload?: string;
+  },
+): Promise<void> {
+  const body: Record<string, unknown> = { command: input.command };
+  if (input.payload !== undefined) {
+    body.payload = input.payload;
+  }
+  const response = await client.send(
+    new InvokeAgentRuntimeCommand({
+      agentRuntimeArn: input.agentRuntimeArn,
+      runtimeSessionId: input.runtimeSessionId,
+      contentType: 'application/json',
+      accept: 'application/json',
+      payload: Buffer.from(JSON.stringify(body), 'utf8'),
+    }),
+  );
+  const rawResponse = await response.response?.transformToByteArray();
+  const text = rawResponse ? Buffer.from(rawResponse).toString('utf8') : '';
+  let parsed: { status?: string; message?: string } = {};
+  if (text) {
+    try {
+      parsed = JSON.parse(text) as { status?: string; message?: string };
+    } catch {
+      // Leave `parsed` empty; the status/message checks below will treat
+      // an unparseable body as a failure.
+    }
+  }
+  if (response.statusCode !== 200 || parsed.status !== 'success') {
+    throw new Error(
+      `AgentCore Runtime "${input.command}" command failed` +
+        (response.statusCode !== undefined
+          ? ` (HTTP ${response.statusCode})`
+          : '') +
+        (parsed.message ? `: ${parsed.message}` : ''),
+    );
+  }
 }
 
 function isTransactionConflict(error: unknown): boolean {
