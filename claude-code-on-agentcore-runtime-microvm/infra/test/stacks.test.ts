@@ -8,6 +8,7 @@ import {
 
 let template: Template;
 let portalTemplate: Template;
+let portalPublicTemplate: Template;
 let bedrockProfileTemplate: Template;
 
 beforeAll(() => {
@@ -34,6 +35,20 @@ beforeAll(() => {
         },
       }),
       'PortalPlatform',
+      { env },
+    ),
+  );
+  portalPublicTemplate = Template.fromStack(
+    new AgentCoreRuntimeStack(
+      new cdk.App({
+        context: {
+          '@aws-cdk/aws-ec2:restrictDefaultSecurityGroup': true,
+          enablePortal: true,
+          portalPublicUrls: 'https://cdn.example.com/v1/portal',
+          vpcCidr: '10.43.0.0/16',
+        },
+      }),
+      'PortalPublicPlatform',
       { env },
     ),
   );
@@ -232,6 +247,27 @@ describe('optional browser portal', () => {
       AuthorizerResultTtlInSeconds: 0,
     });
     portalTemplate.resourceCountIs('AWS::Cognito::UserPool', 1);
+  });
+
+  it('registers extra callback URLs from portalPublicUrls', () => {
+    portalPublicTemplate.hasResourceProperties(
+      'AWS::Cognito::UserPoolClient',
+      {
+        CallbackURLs: Match.arrayWith(['https://cdn.example.com/v1/portal']),
+        LogoutURLs: Match.arrayWith(['https://cdn.example.com/v1/portal']),
+      },
+    );
+  });
+
+  it('keeps the private portal URL alongside public ones', () => {
+    const clients = portalPublicTemplate.findResources(
+      'AWS::Cognito::UserPoolClient',
+    );
+    const client = Object.values(clients)[0] as {
+      Properties: { CallbackURLs: unknown[]; LogoutURLs: unknown[] };
+    };
+    expect(client.Properties.CallbackURLs).toHaveLength(2);
+    expect(client.Properties.LogoutURLs).toHaveLength(2);
   });
 });
 

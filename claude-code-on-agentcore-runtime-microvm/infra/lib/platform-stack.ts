@@ -72,6 +72,12 @@ export class AgentCoreRuntimeStack extends cdk.Stack {
       this.node.tryGetContext('enablePortal'),
       false,
     );
+    // Extra absolute portal URLs to register as Cognito callback/logout URLs,
+      // for deployments that front the private API with a CDN or proxy (e.g. a
+    // CloudFront VPC origin). Comma-separated https URLs.
+    const portalPublicUrls = parsePortalPublicUrls(
+      this.node.tryGetContext('portalPublicUrls'),
+    );
     const idleAfterSeconds = new cdk.CfnParameter(
       this,
       'IdleAfterSeconds',
@@ -666,8 +672,8 @@ export class AgentCoreRuntimeStack extends cdk.Stack {
               cognito.OAuthScope.EMAIL,
               cognito.OAuthScope.PROFILE,
             ],
-            callbackUrls: [portalUrl],
-            logoutUrls: [portalUrl],
+            callbackUrls: [portalUrl, ...portalPublicUrls],
+            logoutUrls: [portalUrl, ...portalPublicUrls],
           },
           preventUserExistenceErrors: true,
         },
@@ -802,6 +808,27 @@ function assertLocalEsbuild(): void {
         'Docker fallback is intentionally disabled for this repository.',
     );
   }
+}
+
+function parsePortalPublicUrls(value: unknown): string[] {
+  if (value === undefined || value === '') {
+    return [];
+  }
+  if (typeof value !== 'string') {
+    throw new Error('portalPublicUrls must be a comma-separated string');
+  }
+  const urls = value
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  for (const url of urls) {
+    if (!url.startsWith('https://')) {
+      throw new Error(
+        `portalPublicUrls entries must be https URLs, got: ${url}`,
+      );
+    }
+  }
+  return urls;
 }
 
 function contextBoolean(value: unknown, defaultValue: boolean): boolean {

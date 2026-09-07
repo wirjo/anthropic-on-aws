@@ -140,6 +140,48 @@ Only the `/portal/*` static asset routes (the SPA shell) are unauthenticated;
 every route that touches session or workspace data requires either the
 Cognito authorizer (portal) or SigV4/IAM (CLI).
 
+## Public access
+
+The API this portal is served from is a **private** API Gateway: its resource
+policy rejects any request that doesn't arrive through the stack's
+`execute-api` VPC interface endpoint. A freshly deployed stack is therefore
+unreachable from a laptop — including the `PortalUrl` — until you give
+yourself a network path into the VPC. `trustedClientCidr` only widens the
+endpoint's security group; on its own it does not create connectivity.
+
+Two ways to get one:
+
+1. **Network into the VPC** — Client VPN, Site-to-Site VPN, Direct Connect,
+   or a Transit Gateway attachment, with `trustedClientCidr` set to the
+   routed client range. Keeps everything private, no public surface.
+2. **Front it with CloudFront** — a distribution using a
+   [VPC origin](https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/private-content-vpc-origins.html)
+   pointed at an internal ALB whose IP target group is the `execute-api` VPC
+   endpoint's ENIs. CloudFront reaches the ALB over AWS's private network, so
+   the ALB stays internal and the API stays private. Three details matter:
+   - CloudFront must inject an `x-apigw-api-id: <rest-api-id>` origin header.
+     Once the request no longer arrives with the `execute-api` hostname in
+     `Host`, that header is what API Gateway resolves the API from.
+   - Use an ALB rather than an NLB. The ALB re-encrypts to the VPC endpoint
+     without validating its certificate, which sidesteps the certificate
+     mismatch you'd hit passing TLS straight through to a hostname the
+     endpoint's certificate doesn't cover.
+   - Register the CloudFront portal URL as a Cognito callback/logout URL with
+     the `portalPublicUrls` context flag, or the OAuth redirect is rejected:
+
+     ```bash
+     npm run deploy -- --config deployment.json --profile <profile> \
+       -c portalPublicUrls=https://<distribution>.cloudfront.net/v1/portal
+     ```
+
+     Declaring it here rather than editing the user pool client by hand keeps
+     the callback list intact across redeploys.
+
+   Caveat: VPC endpoint ENI IPs are not contractually stable, so a static IP
+   target group can go stale if AWS rescales the endpoint. For anything
+   long-lived, refresh the target group from `describe-vpc-endpoints` on a
+   schedule.
+
 ## Operator CLI
 
 ```bash

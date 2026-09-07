@@ -62,13 +62,33 @@ export async function handler(
   return response(404, 'text/plain', 'Not found');
 }
 
+// Derived from the Host header the browser actually used, not from the
+// API's own execute-api name: the OAuth redirect_uri has to match the
+// origin the browser is on. Hitting the private API directly yields the
+// same execute-api URL as before, but this also stays correct when the
+// portal is fronted by a CDN or proxy (see README, "Public access").
 function portalUrl(event: APIGatewayProxyEvent): string {
-  const { apiId, stage } = event.requestContext;
-  const region = process.env.AWS_REGION ?? 'us-east-1';
-  if (!apiId || !stage) {
-    throw new Error('Request context is missing apiId or stage');
+  const { stage } = event.requestContext;
+  if (!stage) {
+    throw new Error('Request context is missing stage');
   }
-  return `https://${apiId}.execute-api.${region}.amazonaws.com/${stage}/portal`;
+  const host = headerValue(event, 'host');
+  if (!host) {
+    throw new Error('Request is missing a Host header');
+  }
+  return `https://${host}/${stage}/portal`;
+}
+
+function headerValue(
+  event: APIGatewayProxyEvent,
+  name: string,
+): string | undefined {
+  for (const [key, value] of Object.entries(event.headers ?? {})) {
+    if (key.toLowerCase() === name && value) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function response(
