@@ -1,10 +1,8 @@
 import process from 'node:process';
 import WebSocket, { type RawData } from 'ws';
-import { SignatureV4 } from '@smithy/signature-v4';
-import { HttpRequest } from '@smithy/protocol-http';
-import { Sha256 } from '@aws-crypto/sha256-js';
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import type { ConnectResponse } from './api.js';
+import { signShellUpgrade } from '../../shared/shell-signing.js';
 import {
   decodeShellFrame,
   encodeClose,
@@ -171,6 +169,7 @@ async function runOneConnection(
   const signedRequest = await signShellUpgrade(
     shellUrl,
     connection.runtimeSessionId,
+    defaultProvider(),
   );
 
   const socket = new WebSocket(shellUrl, {
@@ -340,51 +339,6 @@ async function runOneConnection(
   throw new Error(
     `AgentCore Runtime shell disconnected (${closeCode}): ${closeReason.toString()}`,
   );
-}
-
-async function signShellUpgrade(
-  url: URL,
-  runtimeSessionId: string,
-): Promise<{ headers: Record<string, string> }> {
-  // Matches the real interactive-shell WebSocket contract (verified against
-  // the bedrock-agentcore Python SDK's AgentCoreRuntimeClient.connect_shell):
-  // the runtime session id travels as a signed header, not a query param.
-  const credentials = await defaultProvider()();
-  const signer = new SignatureV4({
-    credentials,
-    region: regionFromHost(url.hostname),
-    service: 'bedrock-agentcore',
-    sha256: Sha256,
-  });
-  const signed = await signer.sign(
-    new HttpRequest({
-      protocol: url.protocol,
-      hostname: url.hostname,
-      method: 'GET',
-      path: url.pathname,
-      query: Object.fromEntries(url.searchParams),
-      headers: {
-        host: url.hostname,
-        'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': runtimeSessionId,
-      },
-    }),
-  );
-  const headers: Record<string, string> = {};
-  for (const [key, value] of Object.entries(signed.headers)) {
-    if (key.toLowerCase() === 'host') continue;
-    headers[key] = value;
-  }
-  return { headers };
-}
-
-function regionFromHost(hostname: string): string {
-  const match = /^bedrock-agentcore\.([a-z0-9-]+)\.amazonaws\.com$/.exec(
-    hostname,
-  );
-  if (!match?.[1]) {
-    throw new Error(`Unable to derive region from shell host: ${hostname}`);
-  }
-  return match[1];
 }
 
 function waitForSessionInitialization(socket: WebSocket): Promise<void> {

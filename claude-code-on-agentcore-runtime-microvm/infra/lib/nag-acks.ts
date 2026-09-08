@@ -262,4 +262,38 @@ export function applyNagAcknowledgements(
       'scoped to the AWS-owned /aws/bedrock-agentcore/runtimes/ prefix, ' +
       'not customer resources.',
   });
+
+  ack('ShellRelayCluster/Resource', {
+    id: 'AwsSolutions-ECS4',
+    reason:
+      'Not applicable: Container Insights is explicitly enabled on this ' +
+      'cluster (containerInsightsV2: ENABLED).',
+  });
+  ack('ShellRelayTaskDefinition/Resource', {
+    id: 'AwsSolutions-ECS2',
+    reason:
+      'The two environment variables (AWS_REGION, RELAY_TOKENS_TABLE_NAME) ' +
+      'are non-sensitive configuration, not secrets -- the relay never ' +
+      'receives credentials, tokens, or session identifiers via its own ' +
+      'environment; those arrive per-connection from the browser and are ' +
+      'looked up in RelayTokens.',
+  });
+  ack('ShellRelayTaskDefinition/TaskRole/DefaultPolicy/Resource', {
+    id: 'AwsSolutions-IAM5[Resource::<AgentRuntime.AgentRuntimeArn>/*]',
+    reason:
+      'Matches the identical, already-acknowledged wildcard on ' +
+      'RuntimeExecutionRole: AgentCore Runtime data-plane APIs require ' +
+      'the agentRuntimeArn wildcard suffix for session-scoped calls. The ' +
+      'relay additionally only ever acts on a runtimeSessionId/shellId ' +
+      'pair it received via a single-use RelayTokens token that the ' +
+      'control plane minted after its own ownership check.',
+  });
+  ack('ShellRelayTaskDefinition/ExecutionRole/DefaultPolicy/Resource', {
+    id: 'AwsSolutions-IAM5[Resource::*]',
+    reason:
+      'CDK-generated Fargate execution role policy for ' +
+      'ecs.ContainerImage.fromAsset (ECR image pull authorization token, ' +
+      'which supports no resource-level ARN) and the CloudWatch Logs ' +
+      'stream this task writes to.',
+  });
 }

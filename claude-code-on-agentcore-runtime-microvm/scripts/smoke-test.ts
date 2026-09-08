@@ -12,9 +12,6 @@
 // If --runtime-arn is omitted, it is discovered from the
 // ClaudeAgentCoreRuntimeStack CloudFormation output (--stack to override
 // the stack name).
-import { SignatureV4 } from '@smithy/signature-v4';
-import { HttpRequest } from '@smithy/protocol-http';
-import { Sha256 } from '@aws-crypto/sha256-js';
 import { defaultProvider } from '@aws-sdk/credential-provider-node';
 import {
   CloudFormationClient,
@@ -27,6 +24,7 @@ import {
   parseShellStatus,
   ShellChannel,
 } from '../client/src/shell-protocol.js';
+import { signShellUpgrade } from '../shared/shell-signing.js';
 
 const args = process.argv.slice(2);
 if (args.includes('--help') || args.includes('-h')) {
@@ -50,9 +48,9 @@ const sessionId = `smoke-test-${Date.now()}-${Math.random().toString(36).slice(2
 );
 const shellId = `smoke-${Date.now()}`;
 const url = buildShellUrl(runtimeArn, region, shellId);
-const headers = await signShellUpgrade(url, region, sessionId);
+const signed = await signShellUpgrade(url, sessionId, defaultProvider({ profile }));
 
-const socket = new WebSocket(url, { headers });
+const socket = new WebSocket(url, { headers: signed.headers });
 let output = '';
 let connected = false;
 
@@ -106,39 +104,6 @@ function buildShellUrl(arn: string, awsRegion: string, id: string): URL {
   );
   url.searchParams.set('shellId', id);
   return url;
-}
-
-async function signShellUpgrade(
-  url: URL,
-  awsRegion: string,
-  sessionId: string,
-): Promise<Record<string, string>> {
-  const credentials = await defaultProvider({ profile })();
-  const signer = new SignatureV4({
-    credentials,
-    region: awsRegion,
-    service: 'bedrock-agentcore',
-    sha256: Sha256,
-  });
-  const signed = await signer.sign(
-    new HttpRequest({
-      protocol: url.protocol,
-      hostname: url.hostname,
-      method: 'GET',
-      path: url.pathname,
-      query: Object.fromEntries(url.searchParams),
-      headers: {
-        host: url.hostname,
-        'X-Amzn-Bedrock-AgentCore-Runtime-Session-Id': sessionId,
-      },
-    }),
-  );
-  const headers: Record<string, string> = {};
-  for (const [key, value] of Object.entries(signed.headers)) {
-    if (key.toLowerCase() === 'host') continue;
-    headers[key] = value;
-  }
-  return headers;
 }
 
 async function discoverRuntimeArn(): Promise<string> {

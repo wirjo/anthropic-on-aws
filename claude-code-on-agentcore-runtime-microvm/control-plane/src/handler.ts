@@ -1,7 +1,8 @@
 import { BedrockAgentCoreClient } from '@aws-sdk/client-bedrock-agentcore';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { S3Client } from '@aws-sdk/client-s3';
-import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { DynamoDBDocumentClient, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { randomBytes } from 'node:crypto';
 import type {
   APIGatewayProxyEvent,
   APIGatewayProxyResult,
@@ -129,9 +130,12 @@ export async function handler(
     }
     if (method === 'POST' && path === '/sessions/{sessionId}/connect') {
       const result = await service.connect(ownerPrincipal, sessionId);
+      const shellUrl = portal
+        ? await mintRelayShellUrl(event, result.connection)
+        : result.connection.endpoint;
       return response(200, {
         session: publicSession(result.record),
-        shellUrl: result.connection.endpoint,
+        shellUrl,
         runtimeSessionId: result.connection.runtimeSessionId,
         shellId: result.connection.shellId,
         tokenExpiresAt: result.connection.expiresAt,
@@ -320,6 +324,53 @@ function requiredEnvironment(name: string): string {
     throw new Error(`Missing required environment variable: ${name}`);
   }
   return value;
+}
+
+// Mints a short-lived, single-use token the browser terminal exchanges for
+// a signed shell connection at the relay (relay/src/index.ts). The real
+// AgentCore identifiers never reach the browser -- only this opaque token
+// does, and it is consumed atomically on first use (see the relay's
+// DeleteCommand-with-condition). Falls back to the raw endpoint if the
+// relay isn't deployed (RELAY_TOKENS_TABLE_NAME unset), so this sample
+// still degrades gracefully for anyone who deploys the portal without the
+// relay's additional manual ALB wiring (see README, "Public access").
+async function mintRelayShellUrl(
+  event: APIGatewayProxyEvent,
+  connection: { endpoint: string; runtimeSessionId: string; shellId: string },
+): Promise<string> {
+  const tableName = process.env.RELAY_TOKENS_TABLE_NAME;
+  const host = headerValue(event, 'host');
+  if (!tableName || !host) {
+    return connection.endpoint;
+  }
+  const config = await loadConfiguration();
+  const token = randomBytes(24).toString('base64url');
+  const ttl = Math.floor(Date.now() / 1_000) + 120;
+  await documentClient.send(
+    new PutCommand({
+      TableName: tableName,
+      Item: {
+        token,
+        runtimeSessionId: connection.runtimeSessionId,
+        shellId: connection.shellId,
+        agentRuntimeArn: config.agentRuntimeArn,
+        ttl,
+      },
+    }),
+  );
+  return `wss://${host}/shell?token=${token}`;
+}
+
+function headerValue(
+  event: APIGatewayProxyEvent,
+  name: string,
+): string | undefined {
+  for (const [key, value] of Object.entries(event.headers ?? {})) {
+    if (key.toLowerCase() === name && value) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 function positiveInteger(name: string): number {

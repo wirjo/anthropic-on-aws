@@ -8,6 +8,8 @@ import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as ecr from 'aws-cdk-lib/aws-ecr';
+import * as ecs from 'aws-cdk-lib/aws-ecs';
+import * as elbv2 from 'aws-cdk-lib/aws-elasticloadbalancingv2';
 import * as events from 'aws-cdk-lib/aws-events';
 import * as eventTargets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -754,6 +756,170 @@ export class AgentCoreRuntimeStack extends cdk.Stack {
       new cdk.CfnOutput(this, 'PortalUrl', { value: portalUrl });
       new cdk.CfnOutput(this, 'PortalUserPoolId', {
         value: portalUserPool.userPoolId,
+      });
+
+      // Signing relay for the browser terminal. InvokeAgentRuntimeCommandShell
+      // requires a SigV4-signed WebSocket upgrade with a custom header;
+      // browsers can do neither. This ECS Fargate service terminates a plain
+      // WebSocket from the browser and opens a second, properly signed one
+      // to the real shell endpoint, piping bytes between them -- see
+      // relay/src/index.ts for the full design rationale.
+      const relayTokens = new dynamodb.Table(this, 'RelayTokens', {
+        partitionKey: { name: 'token', type: dynamodb.AttributeType.STRING },
+        billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+        timeToLiveAttribute: 'ttl',
+        removalPolicy: cdk.RemovalPolicy.DESTROY,
+      });
+      relayTokens.grantWriteData(controlFunction);
+      controlFunction.addEnvironment(
+        'RELAY_TOKENS_TABLE_NAME',
+        relayTokens.tableName,
+      );
+
+      const relaySecurityGroup = new ec2.SecurityGroup(
+        this,
+        'ShellRelaySecurityGroup',
+        {
+          vpc,
+          description: 'Browser-terminal signing relay (Fargate task)',
+          allowAllOutbound: true,
+        },
+      );
+      relaySecurityGroup.addIngressRule(
+        apiEndpointSg,
+        ec2.Port.tcp(8080),
+        'Internal ALB routes /shell* here for the browser terminal',
+      );
+      // The relay task needs to reach the ECR interface endpoints (to pull
+      // its own image) and the bedrock-agentcore data-plane endpoint (to
+      // open the signed upstream shell connection); both endpoints' shared
+      // security group only allowed the main AgentCore Runtime security
+      // group in until now -- confirmed live: without this, Fargate task
+      // placement fails with "unable to pull registry auth... i/o timeout"
+      // trying to reach the ECR VPC endpoint.
+      endpointSg.addIngressRule(
+        relaySecurityGroup,
+        ec2.Port.tcp(443),
+        'Shell relay pulling its image and reaching interface endpoints',
+      );
+
+      const relayCluster = new ecs.Cluster(this, 'ShellRelayCluster', {
+        vpc,
+        containerInsightsV2: ecs.ContainerInsights.ENABLED,
+      });
+      const relayTaskDefinition = new ecs.FargateTaskDefinition(
+        this,
+        'ShellRelayTaskDefinition',
+        {
+          cpu: 256,
+          memoryLimitMiB: 512,
+          // The relay image is built locally by `cdk deploy`
+          // (ecs.ContainerImage.fromAsset), which builds for the CDK
+          // CLI's host architecture rather than cross-compiling; on an
+          // arm64 build host that produces an arm64 image, which crashes
+          // with "exec format error" on Fargate's default x86_64
+          // platform (confirmed live). Pinning arm64/Graviton here makes
+          // the platform match whatever the build host actually
+          // produced, and is also the cheaper Fargate option.
+          runtimePlatform: {
+            cpuArchitecture: ecs.CpuArchitecture.ARM64,
+            operatingSystemFamily: ecs.OperatingSystemFamily.LINUX,
+          },
+        },
+      );
+      relayTaskDefinition.addContainer('relay', {
+        image: ecs.ContainerImage.fromAsset(repositoryRoot, {
+          file: 'relay/Dockerfile',
+        }),
+        portMappings: [{ containerPort: 8080 }],
+        environment: {
+          AWS_REGION: this.region,
+          RELAY_TOKENS_TABLE_NAME: relayTokens.tableName,
+        },
+        logging: ecs.LogDrivers.awsLogs({
+          streamPrefix: 'shell-relay',
+          logGroup: new logs.LogGroup(this, 'ShellRelayLogGroup', {
+            logGroupName: `/${projectName}/shell-relay`,
+            retention: logs.RetentionDays.THREE_MONTHS,
+            removalPolicy: cdk.RemovalPolicy.DESTROY,
+          }),
+        }),
+      });
+      relayTokens.grantReadWriteData(relayTaskDefinition.taskRole);
+      relayTaskDefinition.taskRole.addToPrincipalPolicy(
+        new iam.PolicyStatement({
+          actions: ['bedrock-agentcore:InvokeAgentRuntimeCommandShell'],
+          resources: [
+            agentRuntime.attrAgentRuntimeArn,
+            `${agentRuntime.attrAgentRuntimeArn}/*`,
+          ],
+        }),
+      );
+      bedrockAgentCoreDataEndpoint.addToPolicy(
+        new iam.PolicyStatement({
+          actions: ['bedrock-agentcore:InvokeAgentRuntimeCommandShell'],
+          principals: [relayTaskDefinition.taskRole],
+          resources: [
+            agentRuntime.attrAgentRuntimeArn,
+            `${agentRuntime.attrAgentRuntimeArn}/*`,
+          ],
+        }),
+      );
+
+      const relayService = new ecs.FargateService(
+        this,
+        'ShellRelayService',
+        {
+          cluster: relayCluster,
+          taskDefinition: relayTaskDefinition,
+          desiredCount: 1,
+          securityGroups: [relaySecurityGroup],
+          vpcSubnets: { subnets: vpc.privateSubnets },
+          assignPublicIp: false,
+          circuitBreaker: { enable: true, rollback: true },
+          minHealthyPercent: 0,
+          maxHealthyPercent: 200,
+        },
+      );
+      const relayTargetGroup = new elbv2.ApplicationTargetGroup(
+        this,
+        'ShellRelayTargetGroup',
+        {
+          vpc,
+          port: 8080,
+          protocol: elbv2.ApplicationProtocol.HTTP,
+          targetType: elbv2.TargetType.IP,
+          healthCheck: { path: '/health' },
+        },
+      );
+      // Deliberately NOT relayService.attachToApplicationTargetGroup(...):
+      // the ECS::Service resource's LoadBalancers property requires the
+      // target group to already have an associated ALB listener at
+      // service-creation time ("target group ... does not have an
+      // associated load balancer", confirmed live) -- but the ALB this
+      // sample's private API and portal already run behind is created
+      // outside this stack (see README, "Public access"), so that
+      // ordering can't be satisfied from inside one `cdk deploy`. Instead,
+      // the task's ENI IP is registered into this (otherwise-standalone)
+      // target group by hand after deploy, and the target group is wired
+      // to the existing ALB with an `elbv2 create-rule` CLI call -- same
+      // pattern already used for the private API's own target group. This
+      // does mean the registration is static: a task replacement (crash,
+      // redeploy) needs the new IP re-registered by hand. Acceptable for a
+      // single-task relay; a follow-up could add a small EventBridge rule
+      // on ECS task state-change events to re-register automatically.
+      new cdk.CfnOutput(this, 'ShellRelayServiceName', {
+        value: relayService.serviceName,
+      });
+      new cdk.CfnOutput(this, 'ShellRelayClusterName', {
+        value: relayCluster.clusterName,
+      });
+      new cdk.CfnOutput(this, 'ShellRelayTargetGroupArn', {
+        value: relayTargetGroup.targetGroupArn,
+        description:
+          'Register the running task\'s IP into this target group, then ' +
+          'create a listener rule on your ALB forwarding \'/shell*\' to ' +
+          'it -- see README, "Public access".',
       });
     }
 

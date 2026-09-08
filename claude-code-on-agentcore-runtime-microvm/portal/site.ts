@@ -261,11 +261,27 @@ async function refresh() {
 
 async function startSession() {
   clearError();
+  var button = el('start-session');
+  button.disabled = true;
+  var originalText = button.textContent;
+  button.textContent = 'Starting...';
   try {
-    await api('POST', 'sessions', { accessMode: 'terminal' });
+    var result = await api('POST', 'sessions', { accessMode: 'terminal' });
     await refresh();
+    // POST /sessions returns 200 (not 201/202) when it silently reused an
+    // already-active session for this workspace instead of creating a new
+    // one -- with no visible change to the table, clicking the button
+    // looked like it did nothing. Surface which one actually happened.
+    el('error').textContent = result && result.created === false
+      ? 'Reusing the existing environment for this workspace (already running).'
+      : 'Environment created.';
+    el('error').hidden = false;
+    setTimeout(clearError, 4000);
   } catch (error) {
     showError(error);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
   }
 }
 
@@ -280,22 +296,75 @@ function openTerminal(session) {
   connectTerminal(session);
 }
 
+// Shell-protocol channel-prefix framing (Kubernetes v5.channel.k8s.io wire
+// format: [1-byte channel id][payload]), matching client/src/shell-
+// protocol.ts exactly -- see that file for the full channel table. The
+// portal previously wrote every incoming frame straight to the terminal
+// (including the leading channel byte as a garbage character) and never
+// prefixed outgoing keystrokes with the STDIN channel byte at all, so even
+// with a working signed connection the terminal would have been unusable.
+var SHELL_CHANNEL_STDIN = 0x00;
+var SHELL_CHANNEL_STDOUT = 0x01;
+var SHELL_CHANNEL_STDERR = 0x02;
+var SHELL_CHANNEL_STATUS = 0x03;
+var SHELL_CHANNEL_HEARTBEAT = 0x05;
+
+function encodeStdinFrame(text) {
+  var body = new TextEncoder().encode(text);
+  var frame = new Uint8Array(body.length + 1);
+  frame[0] = SHELL_CHANNEL_STDIN;
+  frame.set(body, 1);
+  return frame;
+}
+
 async function connectTerminal(session) {
   try {
     var connection = await api('POST', 'sessions/' + session.sessionId + '/connect', {});
     var socket = new WebSocket(connection.shellUrl);
     terminalSocket = socket;
     socket.binaryType = 'arraybuffer';
+    var bootstrapSent = false;
+    var heartbeatTimer = setInterval(function () {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(new Uint8Array([SHELL_CHANNEL_HEARTBEAT]));
+      }
+    }, 20000);
+    socket.addEventListener('close', function () { clearInterval(heartbeatTimer); });
     socket.addEventListener('message', function (event) {
-      if (typeof event.data === 'string') {
-        terminal.write(event.data);
-      } else {
-        terminal.write(new Uint8Array(event.data));
+      var frame = new Uint8Array(event.data);
+      if (frame.length === 0) { return; }
+      var channel = frame[0];
+      var payload = frame.subarray(1);
+      if (channel === SHELL_CHANNEL_STDOUT || channel === SHELL_CHANNEL_STDERR) {
+        terminal.write(payload);
+      } else if (channel === SHELL_CHANNEL_STATUS) {
+        try {
+          var status = JSON.parse(new TextDecoder().decode(payload));
+          if (status.status === 'Failure') {
+            showError(new Error(status.message || status.reason || 'Shell error'));
+          } else if (!bootstrapSent && socket.readyState === WebSocket.OPEN) {
+            // Matches client/src/terminal.ts's developerShellBootstrapCommand():
+            // drop the shell's default root privileges to the developer user
+            // and load the session's Bedrock environment. Without this, the
+            // portal terminal connects fine but lands in an unconfigured
+            // root shell with no CLAUDE_CODE_USE_BEDROCK/ANTHROPIC_MODEL set.
+            bootstrapSent = true;
+            socket.send(encodeStdinFrame(
+              'exec setpriv --reuid=1000 --regid=1000 --init-groups ' +
+              '/usr/local/bin/developer-shell\n'));
+          }
+        } catch (error) {
+          // Non-JSON status payload; ignore.
+        }
+      } else if (channel === SHELL_CHANNEL_HEARTBEAT) {
+        if (socket.readyState === WebSocket.OPEN) {
+          socket.send(frame);
+        }
       }
     });
     terminal.onData(function (data) {
       if (socket.readyState === WebSocket.OPEN) {
-        socket.send(new TextEncoder().encode(data));
+        socket.send(encodeStdinFrame(data));
       }
     });
   } catch (error) {
