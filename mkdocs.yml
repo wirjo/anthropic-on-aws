@@ -1,4 +1,4 @@
-site_name: Anthropic on AWS
+site_name: Claude Platform on AWS
 theme:
   name: material
   font:
