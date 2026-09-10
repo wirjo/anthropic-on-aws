@@ -145,24 +145,33 @@ export function applyNagAcknowledgements(
       'deliver execution and access logs to CloudWatch.',
   });
 
-  if (options.bedrockUsesInferenceProfile) {
-    // The wildcard is on RuntimeExecutionRole (the AgentCore Runtime
-    // microVM's role, which actually calls bedrock:InvokeModel), not
-    // ControlFunction (the control-plane Lambda, which never calls
-    // Bedrock directly) -- this suppression previously targeted the
-    // wrong construct path and cdk-nag flagged the finding as
-    // unsuppressed the first time this deployment actually exercised the
-    // inference-profile branch end to end.
-    ack('RuntimeExecutionRole/DefaultPolicy/Resource', {
-      id: `AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:bedrock:*::foundation-model/${options.bedrockFoundationModelId}]`,
-      reason:
-        'Cross-region inference profiles require the foundation-model ' +
-        'ARN in every fan-out region (region segment wildcard); the ' +
-        'model identifier itself is pinned to the one approved Claude ' +
-        'model and the grant is limited to bedrock:InvokeModel and ' +
-        'InvokeModelWithResponseStream.',
-    });
-  }
+  // The wildcard is on RuntimeExecutionRole (the AgentCore Runtime
+  // microVM's role, which actually calls bedrock:InvokeModel), not
+  // ControlFunction (the control-plane Lambda, which never calls
+  // Bedrock directly). Scoped to all Bedrock foundation models and
+  // inference profiles in this account/region -- rather than the one
+  // model this deployment happens to be configured for -- because the
+  // Claude Code CLI's model shorthands ("sonnet", "opus", etc.) and
+  // users switching models at runtime need more than a single
+  // allow-listed ARN; the previous single-ARN scoping caused a
+  // confusing 403 the moment anything other than the exact configured
+  // model was invoked (confirmed live). The grant is still limited to
+  // bedrock:InvokeModel and InvokeModelWithResponseStream, and this
+  // role has no other permissions of consequence (see its own doc
+  // comment: deliberately no workspace S3 access).
+  ack('RuntimeExecutionRole/DefaultPolicy/Resource', {
+    id: 'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:bedrock:*::foundation-model/*]',
+    reason:
+      'Runtime role is intentionally allowed to invoke any Bedrock ' +
+      'foundation model (see Claude Code model-shorthand note above); ' +
+      'invocation is limited to InvokeModel/InvokeModelWithResponseStream.',
+  });
+  ack('RuntimeExecutionRole/DefaultPolicy/Resource', {
+    id: 'AwsSolutions-IAM5[Resource::arn:<AWS::Partition>:bedrock:us-west-2:<AWS::AccountId>:inference-profile/*]',
+    reason:
+      'Same rationale as the foundation-model wildcard above, for ' +
+      'cross-region inference profiles.',
+  });
 
   ack('ControlFunction/ServiceRole/DefaultPolicy/Resource', {
     id: 'AwsSolutions-IAM5[Action::s3:GetObject*]',

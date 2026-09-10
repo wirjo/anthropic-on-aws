@@ -253,6 +253,7 @@ def session_environment(session: Session) -> dict[str, str]:
         "USER": "developer",
         "SHELL": "/bin/bash",
         "TERM": "xterm-256color",
+        "COLORTERM": "truecolor",
         "PATH": "/usr/local/bin:/usr/bin:/bin",
         "CLAUDE_CONFIG_DIR": str(CLAUDE_SETTINGS.parent),
         "DISABLE_AUTOUPDATER": "1",

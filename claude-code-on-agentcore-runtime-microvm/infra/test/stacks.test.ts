@@ -184,15 +184,20 @@ describe('control and runtime permissions', () => {
     );
   });
 
-  it('routes direct and inference-profile Bedrock model IDs to their required permissions', () => {
+  it('grants Bedrock invoke on all foundation models and inference profiles, not one pinned model ARN', () => {
+    // Intentionally wide: the Claude Code CLI's model shorthands
+    // ("sonnet", "opus", etc.) and users switching models at runtime
+    // resolve to model IDs the deployment-time bedrockModelId context
+    // value never sees. Pinning the runtime role/VPC-endpoint policy to
+    // one exact ARN caused a confusing 403 the moment anything else was
+    // invoked (confirmed live). Every deployment now grants the same
+    // wildcard resources regardless of which model ID it happens to be
+    // configured with, so this only needs to be checked once against
+    // the default (direct-model) template.
     const direct = JSON.stringify(template.toJSON());
+    expect(direct).toContain(':bedrock:*::foundation-model/*');
     expect(direct).toContain(
-      ':bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-5',
-    );
-    const profile = JSON.stringify(bedrockProfileTemplate.toJSON());
-    expect(profile).toContain(
-      ':bedrock:us-east-1:111122223333:' +
-        'inference-profile/eu.anthropic.claude-sonnet-5',
+      ':bedrock:us-east-1:111122223333:inference-profile/*',
     );
   });
 

@@ -80,6 +80,31 @@ export class AgentCoreRuntimeStack extends cdk.Stack {
     const portalPublicUrls = parsePortalPublicUrls(
       this.node.tryGetContext('portalPublicUrls'),
     );
+    // Security group of the external ALB fronting this deployment (see
+    // README, "Public access") -- that ALB is created outside this stack,
+    // so its security group can't be a construct we own. Needed so the
+    // shell relay's own security group can allow inbound 8080 from the
+    // ALB's *real* identity. A previous version of this code allowed
+    // ingress from apiEndpointSg instead (the private execute-api VPC
+    // endpoint's security group) -- a different security group entirely
+    // from the one ALB-to-target traffic actually carries, so that rule
+    // never worked. It was "fixed" by hand with a raw `aws ec2
+    // authorize-security-group-ingress` call outside of CDK, which is not
+    // durable: the next `cdk deploy` doesn't know about it, and depending
+    // on how the security group's rule set gets reconciled it can
+    // silently disappear, leaving the relay unreachable again with no
+    // code change to explain why (confirmed live, more than once).
+    const albSecurityGroupId = this.node.tryGetContext(
+      'albSecurityGroupId',
+    ) as string | undefined;
+    const albSecurityGroup = albSecurityGroupId
+      ? ec2.SecurityGroup.fromSecurityGroupId(
+          this,
+          'ExternalAlbSecurityGroup',
+          albSecurityGroupId,
+          { mutable: false },
+        )
+      : undefined;
     const idleAfterSeconds = new cdk.CfnParameter(
       this,
       'IdleAfterSeconds',
@@ -373,22 +398,23 @@ export class AgentCoreRuntimeStack extends cdk.Stack {
     );
     repository.grantPull(runtimeExecutionRole);
 
+    // Scoped to all Bedrock foundation models and inference profiles in
+    // this account/region rather than pinning to the one model ID this
+    // deployment happens to be configured for: the Claude Code CLI's model
+    // shorthands ("sonnet", "opus", etc.) and users switching models at
+    // runtime need more than a single allow-listed ARN, and the earlier
+    // single-ARN scoping caused a confusing 403 the moment anything other
+    // than the exact configured model was invoked (confirmed live -- see
+    // README "Public access" section). InvokeModel/
+    // InvokeModelWithResponseStream are still the only actions granted.
     const bedrockResources = [
-      `arn:${this.partition}:bedrock:*::foundation-model/${bedrockFoundationModelId}`,
+      `arn:${this.partition}:bedrock:*::foundation-model/*`,
+      this.formatArn({
+        service: 'bedrock',
+        resource: 'inference-profile',
+        resourceName: '*',
+      }),
     ];
-    if (bedrockUsesInferenceProfile) {
-      bedrockResources.unshift(
-        this.formatArn({
-          service: 'bedrock',
-          resource: 'inference-profile',
-          resourceName: bedrockModelId,
-        }),
-      );
-    } else {
-      bedrockResources[0] =
-        `arn:${this.partition}:bedrock:${this.region}::` +
-        `foundation-model/${bedrockFoundationModelId}`;
-    }
     const invokeBedrock = new iam.PolicyStatement({
       actions: ['bedrock:InvokeModel', 'bedrock:InvokeModelWithResponseStream'],
       resources: bedrockResources,
@@ -786,9 +812,10 @@ export class AgentCoreRuntimeStack extends cdk.Stack {
         },
       );
       relaySecurityGroup.addIngressRule(
-        apiEndpointSg,
+        albSecurityGroup ?? apiEndpointSg,
         ec2.Port.tcp(8080),
-        'Internal ALB routes /shell* here for the browser terminal',
+        'Internal ALB /shell traffic (see README Public access; ' +
+          'falls back to apiEndpointSg when albSecurityGroupId unset)',
       );
       // The relay task needs to reach the ECR interface endpoints (to pull
       // its own image) and the bedrock-agentcore data-plane endpoint (to
@@ -892,20 +919,71 @@ export class AgentCoreRuntimeStack extends cdk.Stack {
           healthCheck: { path: '/health' },
         },
       );
-      // Deliberately NOT relayService.attachToApplicationTargetGroup(...):
-      // the ECS::Service resource's LoadBalancers property requires the
-      // target group to already have an associated ALB listener at
-      // service-creation time ("target group ... does not have an
-      // associated load balancer", confirmed live) -- but the ALB this
-      // sample's private API and portal already run behind is created
-      // outside this stack (see README, "Public access"), so that
-      // ordering can't be satisfied from inside one `cdk deploy`. Instead,
-      // the task's ENI IP is registered into this (otherwise-standalone)
-      // target group by hand after deploy, and the target group is wired
-      // to the existing ALB with an `elbv2 create-rule` CLI call -- same
-      // pattern already used for the private API's own target group. This
-      // does mean the registration is static: a task replacement (crash,
-      // redeploy) needs the new IP re-registered by hand. Acceptable for a
+      // The relay's task IP is registered into this (otherwise-standalone)
+      // target group by hand once, and the target group is wired to the
+      // existing ALB with an `elbv2 create-rule` CLI call -- see README,
+      // "Public access". The ALB itself lives outside this stack, so
+      // attaching the target group to the ECS service directly at
+      // deploy time isn't possible (the ECS::Service resource's
+      // LoadBalancers property requires the target group to already
+      // have an associated ALB listener at service-creation time --
+      // "target group ... does not have an associated load balancer",
+      // confirmed live).
+      //
+      // What IS handled automatically from here on: every task
+      // replacement (deploy, crash, circuit-breaker rollback) used to
+      // leave the relay silently unreachable until someone manually
+      // re-ran `elbv2 register-targets` -- confirmed live, repeatedly,
+      // during end-to-end testing. The EventBridge rule + Lambda below
+      // registers/deregisters the task's IP automatically on every ECS
+      // Task State Change event for this cluster, so only the one-time
+      // target-group-to-ALB wiring above needs to happen by hand.
+      const registerTargetFunction = new lambdaNode.NodejsFunction(
+        this,
+        'RelayTargetRegistrarFunction',
+        {
+          runtime: lambda.Runtime.NODEJS_20_X,
+          architecture: lambda.Architecture.ARM_64,
+          entry: path.join(repositoryRoot, 'relay/register-target-handler.ts'),
+          handler: 'handler',
+          timeout: cdk.Duration.seconds(15),
+          memorySize: 128,
+          logGroup: new logs.LogGroup(
+            this,
+            'RelayTargetRegistrarLogGroup',
+            {
+              logGroupName: `/${projectName}/relay-target-registrar`,
+              retention: logs.RetentionDays.TWO_WEEKS,
+              removalPolicy: cdk.RemovalPolicy.DESTROY,
+            },
+          ),
+          environment: {
+            RELAY_TARGET_GROUP_ARN: relayTargetGroup.targetGroupArn,
+            RELAY_TARGET_PORT: '8080',
+          },
+          bundling: { minify: true, sourceMap: true },
+        },
+      );
+      registerTargetFunction.addToRolePolicy(
+        new iam.PolicyStatement({
+          actions: [
+            'elasticloadbalancing:RegisterTargets',
+            'elasticloadbalancing:DeregisterTargets',
+          ],
+          resources: [relayTargetGroup.targetGroupArn],
+        }),
+      );
+      new events.Rule(this, 'RelayTaskStateChangeRule', {
+        eventPattern: {
+          source: ['aws.ecs'],
+          detailType: ['ECS Task State Change'],
+          detail: {
+            clusterArn: [relayCluster.clusterArn],
+            lastStatus: ['RUNNING', 'STOPPED'],
+          },
+        },
+        targets: [new eventTargets.LambdaFunction(registerTargetFunction)],
+      });
       // single-task relay; a follow-up could add a small EventBridge rule
       // on ECS task state-change events to re-register automatically.
       new cdk.CfnOutput(this, 'ShellRelayServiceName', {

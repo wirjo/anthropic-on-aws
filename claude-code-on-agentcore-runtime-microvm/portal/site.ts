@@ -13,30 +13,108 @@ export const PORTAL_HTML = `<!doctype html>
 <link rel="icon" href="data:,">
 <link rel="stylesheet" href="xterm.css">
 <style>
-  :root { color-scheme: light; font-family: system-ui, sans-serif; }
-  body { margin: 0; background: #f5f7f8; color: #182126; }
+  :root {
+    color-scheme: light;
+    font-family: -apple-system, "Segoe UI", Roboto, system-ui, sans-serif;
+    --ink: #16211f;
+    --sub: #5b6b68;
+    --line: #dde4e2;
+    --bg: #f6f8f7;
+    --card: #ffffff;
+    --brand: #cc785c;
+    --brand-dark: #a85c42;
+    --danger: #b42318;
+    --danger-bg: #fdf1ef;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.5;
+  }
   header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: .75rem 1.5rem;
-    border-bottom: 1px solid #d7dfe2;
-    background: #fff;
+    padding: 1rem 1.75rem;
+    border-bottom: 1px solid var(--line);
+    background: var(--card);
   }
-  main { padding: 1.5rem; max-width: 60rem; margin: 0 auto; }
+  header h1 {
+    font-size: 1.15rem;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: -0.01em;
+  }
+  header div { display: flex; align-items: center; gap: .75rem; font-size: .9rem; color: var(--sub); }
+  main { padding: 2rem 1.75rem; max-width: 62rem; margin: 0 auto; }
+  #app > div {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 1.25rem;
+  }
+  #app > div > div { display: flex; gap: .6rem; }
   button {
-    border: 1px solid #d7dfe2;
-    border-radius: 4px;
-    background: #fff;
-    padding: .45rem .75rem;
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    background: var(--card);
+    color: var(--ink);
+    padding: .5rem .9rem;
+    font-size: .875rem;
+    font-weight: 500;
     cursor: pointer;
+    transition: border-color .15s, background .15s;
   }
-  button.primary { background: #006d77; color: #fff; border-color: #006d77; }
-  table { width: 100%; border-collapse: collapse; margin-top: 1rem; }
-  th, td { text-align: left; padding: .5rem; border-bottom: 1px solid #eef2f3; }
-  dialog { width: min(90vw, 60rem); border: none; border-radius: 6px; padding: 0; }
-  #terminal-screen { height: 60vh; background: #101418; padding: .5rem; }
-  #error { color: #b42318; margin-top: .5rem; }
+  button:hover { border-color: var(--brand); }
+  button:disabled { opacity: .55; cursor: default; }
+  button.primary {
+    background: var(--brand);
+    color: #fff;
+    border-color: var(--brand);
+  }
+  button.primary:hover { background: var(--brand-dark); border-color: var(--brand-dark); }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  th, td { text-align: left; padding: .65rem .9rem; font-size: .875rem; }
+  th {
+    color: var(--sub);
+    font-weight: 600;
+    font-size: .78rem;
+    text-transform: uppercase;
+    letter-spacing: .04em;
+    border-bottom: 1px solid var(--line);
+  }
+  td { border-bottom: 1px solid var(--line); }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover { background: #fafbfa; }
+  dialog {
+    width: min(92vw, 64rem);
+    border: none;
+    border-radius: 10px;
+    padding: 0;
+    box-shadow: 0 20px 60px rgba(0,0,0,.25);
+  }
+  dialog::backdrop { background: rgba(15, 20, 19, .55); }
+  #terminal-screen { height: 62vh; background: #141a1f; padding: .6rem; border-radius: 10px 10px 0 0; }
+  #terminal-dialog button { border-radius: 0 0 10px 10px; width: 100%; border: none; background: #1c2429; color: #cfd8d6; padding: .6rem; }
+  #terminal-dialog button:hover { background: #262f35; border-color: transparent; }
+  #error {
+    color: var(--danger);
+    background: var(--danger-bg);
+    border: 1px solid #f3d4d0;
+    border-radius: 6px;
+    padding: .6rem .9rem;
+    margin-top: 1rem;
+    font-size: .875rem;
+  }
 </style>
 </head>
 <body>
@@ -50,8 +128,12 @@ export const PORTAL_HTML = `<!doctype html>
 <main>
   <button id="sign-in" class="primary">Sign in</button>
   <section id="app" hidden>
-    <button id="start-session" class="primary">Create environment</button>
-    <button id="refresh">Refresh</button>
+    <div>
+      <div>
+        <button id="start-session" class="primary">Create environment</button>
+        <button id="refresh">Refresh</button>
+      </div>
+    </div>
     <table>
       <thead>
         <tr><th>Session</th><th>Workspace</th><th>State</th><th>Updated</th><th></th></tr>
@@ -291,7 +373,49 @@ var terminalSocket;
 function openTerminal(session) {
   clearError();
   el('terminal-dialog').showModal();
-  terminal = new window.Terminal({ convertEol: true });
+  terminal = new window.Terminal({
+    convertEol: true,
+    fontFamily: '"SF Mono", "Cascadia Code", "Fira Code", Menlo, Consolas, monospace',
+    fontSize: 13,
+    lineHeight: 1.35,
+    cursorBlink: true,
+    scrollback: 5000,
+    // Explicit theme, not xterm.js's stock defaults: this file's own
+    // history flagged the terminal rendering an accent as red where the
+    // Claude Code CLI's own branding is orange. TERM=xterm-256color and
+    // COLORTERM=truecolor are both set server-side (agent-runtime/agent.py)
+    // so the CLI emits true 24-bit color for its own UI rather than
+    // falling back to the nearest ANSI-16 slot -- but xterm.js's ANSI
+    // palette is still consulted for anything the app sends as a plain
+    // named color, and its stock "red" (ansi 1/9) is a plain red with no
+    // orange undertone, so any 16-color fallback path still looked red
+    // instead of on-brand. Nudging ansi red toward Claude's actual brand
+    // rust/orange (#CC785C-ish) fixes that without touching how genuine
+    // truecolor output renders.
+    theme: {
+      background: '#141a1f',
+      foreground: '#e8ecee',
+      cursor: '#e8664a',
+      cursorAccent: '#141a1f',
+      selectionBackground: '#2a3a42',
+      black: '#141a1f',
+      red: '#e8664a',
+      green: '#4caf7d',
+      yellow: '#e0b84a',
+      blue: '#5b9bd5',
+      magenta: '#b98cce',
+      cyan: '#4dbfbf',
+      white: '#e8ecee',
+      brightBlack: '#5a6670',
+      brightRed: '#f08a70',
+      brightGreen: '#6fce9c',
+      brightYellow: '#efc96b',
+      brightBlue: '#7cb3e0',
+      brightMagenta: '#caa4dc',
+      brightCyan: '#71d4d4',
+      brightWhite: '#ffffff',
+    },
+  });
   terminal.open(el('terminal-screen'));
   connectTerminal(session);
 }
@@ -323,7 +447,24 @@ async function connectTerminal(session) {
     var socket = new WebSocket(connection.shellUrl);
     terminalSocket = socket;
     socket.binaryType = 'arraybuffer';
-    var bootstrapSent = false;
+    // Tracks, per AgentCore session (not per WebSocket), whether the
+    // developer-shell privilege-drop bootstrap has already been sent.
+    // The shell protocol's own STATUS frame metadata.reconnected flag
+    // looked like the right signal for this and is what an earlier fix
+    // used -- but confirmed live it is false even when reattaching to a
+    // workspace whose shell already has an interactive claude session
+    // running (e.g. after closing and reopening the terminal dialog, or
+    // resuming a checkpointed workspace), so it does not actually track
+    // what this needs. Resending the bootstrap into a live claude TUI
+    // does not execute it -- claude treats the pasted text as chat
+    // input, drops into its own "manual mode", and every further
+    // keystroke goes into that chat prompt instead of a shell. That is
+    // the exact shape of the "terminal won't let me type" bug reported
+    // live. sessionStorage survives across reconnects within the same
+    // browser tab/session and is keyed by the AgentCore sessionId, so a
+    // second connect to the same session never re-sends the bootstrap.
+    var bootstrapKey = 'portalBootstrapped:' + session.sessionId;
+    var bootstrapSent = sessionStorage.getItem(bootstrapKey) === '1';
     var heartbeatTimer = setInterval(function () {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(new Uint8Array([SHELL_CHANNEL_HEARTBEAT]));
@@ -342,12 +483,31 @@ async function connectTerminal(session) {
           var status = JSON.parse(new TextDecoder().decode(payload));
           if (status.status === 'Failure') {
             showError(new Error(status.message || status.reason || 'Shell error'));
-          } else if (!bootstrapSent && socket.readyState === WebSocket.OPEN) {
+          } else if (
+            !bootstrapSent &&
+            !(status.metadata && status.metadata.reconnected) &&
+            socket.readyState === WebSocket.OPEN
+          ) {
             // Matches client/src/terminal.ts's developerShellBootstrapCommand():
             // drop the shell's default root privileges to the developer user
             // and load the session's Bedrock environment. Without this, the
             // portal terminal connects fine but lands in an unconfigured
             // root shell with no CLAUDE_CODE_USE_BEDROCK/ANTHROPIC_MODEL set.
+            //
+            // The metadata.reconnected check matters more than it looks:
+            // confirmed live, connecting to a session that already had an
+            // interactive claude session running (e.g. after a browser
+            // refresh, or resuming a checkpointed workspace) sent this
+            // bootstrap command into that already-running process's stdin
+            // instead of a shell prompt. Claude Code doesn't execute it --
+            // it treats the pasted text as chat input, drops into its own
+            // "manual mode", and every subsequent keystroke goes into that
+            // chat prompt instead of a shell. That is the exact shape of
+            // the "terminal won't let me type" bug reported live: typing
+            // wasn't actually broken, the bootstrap re-send on every
+            // reconnect had silently hijacked the session out from under
+            // the user. Skipping the bootstrap on a reconnected shell fixes
+            // it without weakening the fresh-connect case at all.
             bootstrapSent = true;
             socket.send(encodeStdinFrame(
               'exec setpriv --reuid=1000 --regid=1000 --init-groups ' +
