@@ -277,6 +277,105 @@ describe('ControlService.start', () => {
     const bob = await service.start(OTHER_OWNER, 'default');
     expect(alice.record.sessionId).not.toBe(bob.record.sessionId);
   });
+
+  // Confirmed live against a real deployment: a session whose runtime had
+  // already died kept returning a non-"not found" error (a RuntimeClientError
+  // 400, not a 404) on every lookup, so it never satisfied the "lookup
+  // succeeded and reported TERMINATED" condition and stayed in TERMINATING
+  // in DynamoDB forever -- meaning it also stayed in ACTIVE_STATES forever,
+  // so start() kept "reusing" the dead session on every call and the owner
+  // could never create a new environment for that workspace again. Nothing
+  // in the test suite exercised this before; both variants (lookup throws,
+  // lookup succeeds but never reports TERMINATED) are covered here.
+  it('unsticks a TERMINATING session once the runtime lookup keeps failing past the timeout', async () => {
+    class ThrowingAgentRuntime extends FakeAgentRuntimeService {
+      public override async get(): Promise<RuntimeSessionDescription> {
+        throw new Error('RuntimeClientError: Received error (400) from runtime');
+      }
+    }
+    const repository = new MemoryRepository();
+    let clock = NOW;
+    const { service } = newService({
+      repository,
+      agentRuntime: new ThrowingAgentRuntime(),
+      now: () => clock,
+    });
+    repository.records.set('stuck-session', {
+      sessionId: 'stuck-session',
+      ownerHash: service.ownerHash(OWNER),
+      workspaceId: 'default',
+      state: 'TERMINATING',
+      createdAt: NOW,
+      updatedAt: NOW,
+      lastActivityAt: NOW,
+      expiresAt: NOW + 3_600,
+      inferenceMode: 'bedrock',
+      accessMode: 'terminal',
+      runtimeArn: CONFIGURATION.agentRuntimeArn,
+      runtimeSessionId: 'runtime-stuck-session',
+    });
+    repository.claims.set(
+      `${service.ownerHash(OWNER)}#default`,
+      'stuck-session',
+    );
+
+    // Still within the grace period: stays stuck rather than guessing.
+    clock = NOW + 60;
+    const stillStuck = await service.start(OWNER, 'default');
+    expect(stillStuck.created).toBe(false);
+    expect(stillStuck.record.sessionId).toBe('stuck-session');
+    expect(stillStuck.record.state).toBe('TERMINATING');
+
+    // Past the grace period: force-heals to TERMINATED and lets a new
+    // environment be created instead of blocking the owner forever.
+    clock = NOW + 4 * 60;
+    const healed = await service.start(OWNER, 'default');
+    expect(healed.created).toBe(true);
+    expect(healed.record.sessionId).not.toBe('stuck-session');
+    const stuckRecord = await repository.get('stuck-session');
+    expect(stuckRecord?.state).toBe('TERMINATED');
+  });
+
+  it('unsticks a TERMINATING session once the runtime keeps reporting a non-TERMINATED state past the timeout', async () => {
+    const repository = new MemoryRepository();
+    let clock = NOW;
+    const agentRuntime = new FakeAgentRuntimeService();
+    agentRuntime.sessions.set('runtime-stuck-session-2', {
+      runtimeSessionId: 'runtime-stuck-session-2',
+      state: 'RUNNING',
+      startedAt: NOW,
+      maximumDurationInSeconds: 28_800,
+    });
+    const { service } = newService({
+      repository,
+      agentRuntime,
+      now: () => clock,
+    });
+    repository.records.set('stuck-session-2', {
+      sessionId: 'stuck-session-2',
+      ownerHash: service.ownerHash(OWNER),
+      workspaceId: 'default',
+      state: 'TERMINATING',
+      createdAt: NOW,
+      updatedAt: NOW,
+      lastActivityAt: NOW,
+      expiresAt: NOW + 3_600,
+      inferenceMode: 'bedrock',
+      accessMode: 'terminal',
+      runtimeArn: CONFIGURATION.agentRuntimeArn,
+      runtimeSessionId: 'runtime-stuck-session-2',
+    });
+    repository.claims.set(
+      `${service.ownerHash(OWNER)}#default`,
+      'stuck-session-2',
+    );
+
+    clock = NOW + 4 * 60;
+    const healed = await service.start(OWNER, 'default');
+    expect(healed.created).toBe(true);
+    const stuckRecord = await repository.get('stuck-session-2');
+    expect(stuckRecord?.state).toBe('TERMINATED');
+  });
 });
 
 describe('ControlService.connect', () => {

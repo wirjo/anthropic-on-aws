@@ -351,7 +351,7 @@ async function connectTerminal(session) {
             bootstrapSent = true;
             socket.send(encodeStdinFrame(
               'exec setpriv --reuid=1000 --regid=1000 --init-groups ' +
-              '/usr/local/bin/developer-shell\n'));
+              '/usr/local/bin/developer-shell\\n'));
           }
         } catch (error) {
           // Non-JSON status payload; ignore.

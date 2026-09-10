@@ -22,6 +22,7 @@ const MAX_DECODED_RUN_HOOK_PAYLOAD_BYTES = 16_384;
 const COMPRESSED_RUN_HOOK_PAYLOAD_PREFIX = 'gzip-base64:';
 const RECONCILE_AFTER_SECONDS = 60;
 const PROVISIONING_TIMEOUT_SECONDS = 5 * 60;
+const TERMINATING_TIMEOUT_SECONDS = 3 * 60;
 const DEFAULT_EXPIRATION_LEAD_SECONDS = 45 * 60;
 
 export class ControlError extends Error {
@@ -538,6 +539,24 @@ export class ControlService {
         record.runtimeSessionId,
       );
     } catch (error) {
+      // A session stuck in TERMINATING is a dead end for the owner: it
+      // stays in ACTIVE_STATES forever, so start() keeps "reusing" it and
+      // the owner can never create a new environment for this workspace
+      // again. This is not hypothetical -- confirmed live: a session
+      // whose container had already exited kept returning a non-404
+      // RuntimeClientError (400) on every lookup, which isNotFound()
+      // correctly does not treat as TERMINATED, so it never healed on
+      // its own. After a grace period (to avoid racing a lookup that's
+      // merely transient), force the record to TERMINATED rather than
+      // leaving it stuck; being wrong in the direction of "let the owner
+      // start a new environment" is far less harmful than blocking them
+      // indefinitely.
+      if (
+        record.state === 'TERMINATING' &&
+        this.now() - record.updatedAt >= TERMINATING_TIMEOUT_SECONDS
+      ) {
+        return this.forceTerminated(record, safeErrorMessage(error));
+      }
       console.error('runtime session lookup failed', {
         sessionId: record.sessionId,
         error: safeErrorMessage(error),
@@ -545,10 +564,20 @@ export class ControlService {
       return record;
     }
     const state = normalizeRuntimeState(description.state);
-    if (
-      (record.state === 'SUSPENDED' && state === 'TERMINATED') ||
-      (record.state === 'TERMINATING' && state !== 'TERMINATED')
-    ) {
+    if (record.state === 'TERMINATING' && state !== 'TERMINATED') {
+      // Same dead-end as above, but for the case where the lookup
+      // *succeeds* yet keeps reporting a state other than TERMINATED
+      // (e.g. AgentCore's default-to-RUNNING fallback for an
+      // unrecognized state string) instead of throwing.
+      if (this.now() - record.updatedAt >= TERMINATING_TIMEOUT_SECONDS) {
+        return this.forceTerminated(
+          record,
+          description.stateReason ?? `stuck reporting ${state}`,
+        );
+      }
+      return record;
+    }
+    if (record.state === 'SUSPENDED' && state === 'TERMINATED') {
       return record;
     }
     // Do not let a stale/looked-up "not found" state override an
@@ -570,6 +599,33 @@ export class ControlService {
     );
     const current = updated ? { ...record, ...patch } : record;
     if (updated && (state === 'TERMINATED' || state === 'FAILED')) {
+      await this.options.repository.releaseWorkspace(current);
+    }
+    return current;
+  }
+
+  // Called when a TERMINATING record has outlived TERMINATING_TIMEOUT_SECONDS
+  // without the runtime ever confirming TERMINATED -- see the call sites in
+  // refreshFromRuntime() for why this dead end is real, not hypothetical.
+  private async forceTerminated(
+    record: SessionRecord,
+    reason: string,
+  ): Promise<SessionRecord> {
+    const patch: Partial<SessionRecord> = {
+      state: 'TERMINATED',
+      updatedAt: this.now(),
+      failureReason:
+        `Runtime state could not be confirmed after ` +
+        `${TERMINATING_TIMEOUT_SECONDS}s in TERMINATING; forced to ` +
+        `TERMINATED (${reason})`,
+    };
+    const updated = await this.options.repository.patch(
+      record.sessionId,
+      patch,
+      [record.state],
+    );
+    const current = updated ? { ...record, ...patch } : record;
+    if (updated) {
       await this.options.repository.releaseWorkspace(current);
     }
     return current;
