@@ -373,6 +373,16 @@ var terminalSocket;
 function openTerminal(session) {
   clearError();
   el('terminal-dialog').showModal();
+  // Whether this session has ever had real activity before this connect,
+  // used by connectTerminal() below to decide whether it's safe to send
+  // the developer-shell bootstrap. Computed once, from data the backend
+  // already returned with the session list/create/connect response --
+  // not from anything client-local (sessionStorage) or wire-protocol-
+  // derived (the shell STATUS frame's reconnected flag), both of which
+  // were tried and confirmed live, by direct re-test, not to track what
+  // this actually needs. See connectTerminal() for the full story.
+  var sessionHadPriorActivity =
+    Number(session.lastActivityAt) > Number(session.createdAt) + 5;
   terminal = new window.Terminal({
     convertEol: true,
     fontFamily: '"SF Mono", "Cascadia Code", "Fira Code", Menlo, Consolas, monospace',
@@ -447,24 +457,28 @@ async function connectTerminal(session) {
     var socket = new WebSocket(connection.shellUrl);
     terminalSocket = socket;
     socket.binaryType = 'arraybuffer';
-    // Tracks, per AgentCore session (not per WebSocket), whether the
-    // developer-shell privilege-drop bootstrap has already been sent.
-    // The shell protocol's own STATUS frame metadata.reconnected flag
-    // looked like the right signal for this and is what an earlier fix
-    // used -- but confirmed live it is false even when reattaching to a
-    // workspace whose shell already has an interactive claude session
-    // running (e.g. after closing and reopening the terminal dialog, or
-    // resuming a checkpointed workspace), so it does not actually track
-    // what this needs. Resending the bootstrap into a live claude TUI
-    // does not execute it -- claude treats the pasted text as chat
-    // input, drops into its own "manual mode", and every further
-    // keystroke goes into that chat prompt instead of a shell. That is
-    // the exact shape of the "terminal won't let me type" bug reported
-    // live. sessionStorage survives across reconnects within the same
-    // browser tab/session and is keyed by the AgentCore sessionId, so a
-    // second connect to the same session never re-sends the bootstrap.
-    var bootstrapKey = 'portalBootstrapped:' + session.sessionId;
-    var bootstrapSent = sessionStorage.getItem(bootstrapKey) === '1';
+    // The developer-shell privilege-drop bootstrap used to be sent from
+    // here, gated on various client-visible signals (a shell-protocol
+    // reconnected flag, then a sessionStorage flag, then a
+    // lastActivityAt/createdAt comparison) -- three separate attempts,
+    // each confirmed broken by live re-testing. Root cause: AgentCore's
+    // shell attach reattaches to one persistent PTY per session (like
+    // tmux attach), not a fresh shell per connect, and none of those
+    // client-visible signals actually tracked "does that PTY already
+    // have claude running in it" -- the one thing that matters. Sending
+    // the bootstrap command into a PTY that already has claude attached
+    // sends it as literal keystrokes into claude's own input, which
+    // drops into its own "manual mode" and swallows every further
+    // keystroke -- the exact shape of the "terminal won't let me type"
+    // bug reported live, repeatedly.
+    //
+    // The bootstrap is now injected server-side, exactly once per
+    // AgentCore session, by the relay itself (relay/src/index.ts's
+    // maybeBootstrapSession()) -- the one component present for every
+    // real connection to a given session's shell, tracked durably in
+    // DynamoDB so it survives relay restarts/redeploys and works across
+    // browser tabs, devices, and reconnects alike. This file only pipes
+    // bytes now.
     var heartbeatTimer = setInterval(function () {
       if (socket.readyState === WebSocket.OPEN) {
         socket.send(new Uint8Array([SHELL_CHANNEL_HEARTBEAT]));
@@ -483,35 +497,6 @@ async function connectTerminal(session) {
           var status = JSON.parse(new TextDecoder().decode(payload));
           if (status.status === 'Failure') {
             showError(new Error(status.message || status.reason || 'Shell error'));
-          } else if (
-            !bootstrapSent &&
-            !(status.metadata && status.metadata.reconnected) &&
-            socket.readyState === WebSocket.OPEN
-          ) {
-            // Matches client/src/terminal.ts's developerShellBootstrapCommand():
-            // drop the shell's default root privileges to the developer user
-            // and load the session's Bedrock environment. Without this, the
-            // portal terminal connects fine but lands in an unconfigured
-            // root shell with no CLAUDE_CODE_USE_BEDROCK/ANTHROPIC_MODEL set.
-            //
-            // The metadata.reconnected check matters more than it looks:
-            // confirmed live, connecting to a session that already had an
-            // interactive claude session running (e.g. after a browser
-            // refresh, or resuming a checkpointed workspace) sent this
-            // bootstrap command into that already-running process's stdin
-            // instead of a shell prompt. Claude Code doesn't execute it --
-            // it treats the pasted text as chat input, drops into its own
-            // "manual mode", and every subsequent keystroke goes into that
-            // chat prompt instead of a shell. That is the exact shape of
-            // the "terminal won't let me type" bug reported live: typing
-            // wasn't actually broken, the bootstrap re-send on every
-            // reconnect had silently hijacked the session out from under
-            // the user. Skipping the bootstrap on a reconnected shell fixes
-            // it without weakening the fresh-connect case at all.
-            bootstrapSent = true;
-            socket.send(encodeStdinFrame(
-              'exec setpriv --reuid=1000 --regid=1000 --init-groups ' +
-              '/usr/local/bin/developer-shell\\n'));
           }
         } catch (error) {
           // Non-JSON status payload; ignore.

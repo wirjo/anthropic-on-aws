@@ -802,6 +802,27 @@ export class AgentCoreRuntimeStack extends cdk.Stack {
         relayTokens.tableName,
       );
 
+      // Durable, server-side record of which AgentCore sessions have
+      // already had their developer-shell bootstrap sent -- written and
+      // read exclusively by the relay itself (relay/src/index.ts), which
+      // is the one component present for every real connection to a
+      // given session's shell regardless of browser tab, device, or
+      // client. See that file's maybeBootstrapSession() for the full
+      // rationale and the three client-side approaches that were tried
+      // and failed live re-testing before landing here.
+      const bootstrappedSessions = new dynamodb.Table(
+        this,
+        'BootstrappedSessions',
+        {
+          partitionKey: {
+            name: 'runtimeSessionId',
+            type: dynamodb.AttributeType.STRING,
+          },
+          billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+          removalPolicy: cdk.RemovalPolicy.DESTROY,
+        },
+      );
+
       const relaySecurityGroup = new ec2.SecurityGroup(
         this,
         'ShellRelaySecurityGroup',
@@ -862,6 +883,7 @@ export class AgentCoreRuntimeStack extends cdk.Stack {
         environment: {
           AWS_REGION: this.region,
           RELAY_TOKENS_TABLE_NAME: relayTokens.tableName,
+          BOOTSTRAPPED_SESSIONS_TABLE_NAME: bootstrappedSessions.tableName,
         },
         logging: ecs.LogDrivers.awsLogs({
           streamPrefix: 'shell-relay',
@@ -873,6 +895,7 @@ export class AgentCoreRuntimeStack extends cdk.Stack {
         }),
       });
       relayTokens.grantReadWriteData(relayTaskDefinition.taskRole);
+      bootstrappedSessions.grantWriteData(relayTaskDefinition.taskRole);
       relayTaskDefinition.taskRole.addToPrincipalPolicy(
         new iam.PolicyStatement({
           actions: ['bedrock-agentcore:InvokeAgentRuntimeCommandShell'],
