@@ -1,5 +1,5 @@
 {
-  "name": "anthropic-on-aws",
+  "name": "claude-platform-on-aws",
   "scripts": {
     "build": "mkdir -p dist/js && npm pack --pack-destination dist/js",
     "clobber": "BRANCH=$(git branch --show-current) && git checkout -b scratch && git checkout $BRANCH && git fetch origin && git reset --hard origin/$BRANCH && git clean -fdx",
